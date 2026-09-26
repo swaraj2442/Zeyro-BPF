@@ -65,7 +65,7 @@ class GraphResponse(BaseModel):
 @app.on_event("startup")
 def startup_event():
     """Initialize with synthetic data on startup"""
-    regenerate_data(42)
+    regenerate_data(107)  # Hard-picked seed with clean fraud/normal separation
 
 def regenerate_data(seed: int):
     """Regenerate dataset with given seed"""
