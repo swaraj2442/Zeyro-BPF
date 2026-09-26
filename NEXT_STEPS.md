@@ -1,8 +1,11 @@
 # NEXT_STEPS.md — Trade Sentinel, Final Stretch
 
-Status as of last check: backend engine tuned and working (fraud avg 77.0 vs
-normal ~24 — clean separation), API live on :8000, frontend live on :5173
-with graph rendering verified, slide published, agent prompt file committed.
+**Status: 2 of 6 priorities COMPLETE ✓**
+
+- ✓ **#1 Agent live in UI** — POST /investigate/{entity_id} wired to Groq (openai/gpt-oss-120b), calls trade_sentinel_prompt.md with live evidence, dynamically renders markdown notes. Caching + debouncing prevent rate limits. Falls back to local computed note if Groq fails (demo never goes blank).
+- ✓ **#2 Hard case locked** — Seed 107: FRAUD_0000 @ 77.8/100 (32-point separation vs max normal 45.7), duplicate-invoice-financing pattern, guaranteed on startup.
+
+**Working state:** API on :8000, frontend on :5173 (auto-selects FRAUD_0000 with live agent note), slide published, all code committed.
 
 **Do not add new features or the "future" products (Fraud/AML, Portfolio
 Early Warning, Compliance) from the markdown. Scope is frozen to Trade
@@ -10,26 +13,14 @@ Sentinel's transaction-investigation flow only.**
 
 ## Priority order — work top to bottom, do not skip ahead
 
-### 1. Confirm the agent is actually live in the UI (do this FIRST)
-Click a flagged entity in the running :5173 app right now. It must trigger a
-real call using `trade_sentinel_prompt.md` and render a generated
-investigation note — not a static/mock string.
+### 1. ✓ DONE: Confirm agent is live in the UI
+**COMPLETED** — Live Groq calls verified working, caching prevents rate limits, markdown rendering clean, fallback ready.
 
-**This is the single most important unknown.** "How AI is being used" is an
-explicit judging criterion. A graph with no live agent call behind it is a
-visualization, not the pitch. If this isn't wired yet, build it now before
-touching anything else.
+### 2. ✓ DONE: Build the one clean "hard case"
+**COMPLETED** — Seed 107 hand-picked via exhaustive search, FRAUD_0000 guaranteed @ 77.8/100 with duplicate-invoice evidence. Graph renders with FRAUD_0000 auto-selected on every load (red dot, high-risk indicator). No randomness on stage.
 
-### 2. Build the one clean "hard case"
-Regenerate or hand-pick a single duplicate-invoice pair with an obvious score
-gap (e.g. one entity ~80+, its counterpart normal ~20s). Confirm it renders
-clearly on the graph with a distinct color/highlight.
-
-This is the exact node you will click during the 7-minute demo — don't leave
-it to chance on a random `/regenerate` call live on stage.
-
-### 3. One full dry run, start to finish
-Run the actual demo script end to end, once, for time:
+### 3. One full dry run, start to finish (DO THIS NOW)
+Run the actual demo script end to end, once, for time, TODAY (before 5:30pm upload):
 - Open the slide
 - Switch to the browser
 - Click the hard case
