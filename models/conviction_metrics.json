@@ -1,0 +1,76 @@
+{
+  "data": {
+    "portfolios": 30,
+    "exporters": 2374,
+    "fraudulent": 514,
+    "hard_negatives": 360,
+    "synthetic": true
+  },
+  "engine_today": {
+    "precision": 0.603,
+    "recall": 0.864,
+    "false_positives": 292,
+    "missed_frauds": 70,
+    "PR_AUC": 0.55,
+    "ROC_AUC": 0.842
+  },
+  "trained_engine_plus_evidence": {
+    "precision": 0.9,
+    "recall": 0.998,
+    "false_positives": 57,
+    "missed_frauds": 1,
+    "PR_AUC": 0.997,
+    "ROC_AUC": 0.998,
+    "threshold": 0.0
+  },
+  "detection_by_variant": {
+    "engine_today": {
+      "dup \u00b7 exact": 1.0,
+      "dup \u00b7 reformatted": 1.0,
+      "dup \u00b7 suffix": 0.698,
+      "dup \u00b7 transposed": 0.121,
+      "ring \u00b7 pure": 1.0,
+      "ring \u00b7 mixed": 1.0
+    },
+    "trained": {
+      "dup \u00b7 exact": 1.0,
+      "dup \u00b7 reformatted": 1.0,
+      "dup \u00b7 suffix": 1.0,
+      "dup \u00b7 transposed": 1.0,
+      "ring \u00b7 pure": 1.0,
+      "ring \u00b7 mixed": 0.992
+    }
+  },
+  "false_positive_rate_by_type": {
+    "engine_today": {
+      "high_volume": 0.117,
+      "legit": 0.025,
+      "reciprocal": 1.0,
+      "standing_order": 1.0
+    },
+    "trained": {
+      "high_volume": 0.008,
+      "legit": 0.014,
+      "reciprocal": 0.258,
+      "standing_order": 0.033
+    }
+  },
+  "learned_engine_weights": {
+    "duplicate_invoice_match": 0.2095,
+    "fan_in_out": 0.0,
+    "velocity": 0.4682,
+    "pass_through_ratio": 0.0,
+    "pagerank_shift": 0.0782,
+    "kyc_volume_mismatch": 0.1001,
+    "dormancy_burst": 0.0,
+    "short_cycle": 0.0,
+    "circular_trade": 0.144
+  },
+  "demo_cases_flagged_by_trained_model": {
+    "Tapti Loom Exports": true,
+    "Opaline Gems": true,
+    "Starfield Diamonds": true,
+    "Veridian Jewels": true,
+    "Northstar Agro Exports": false
+  }
+}

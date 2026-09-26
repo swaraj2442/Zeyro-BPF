@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 from data_gen import generate_dataset, Entity, Transaction, EntityType
 from difflib import SequenceMatcher
+import re
 
 # Lightweight graph implementation (no networkx dependency)
 class MultiDiGraph:
@@ -85,56 +86,99 @@ RISK_WEIGHTS = {
     "kyc_volume_mismatch": 0.05,
     "dormancy_burst": 0.02,
     "short_cycle": 0.02,
+    "circular_trade": 0.30,
 }
 
-def fuzzy_match_invoices(inv1: str, inv2: str, threshold: float = 0.75) -> Tuple[bool, float]:
-    """Fuzzy match two invoice references; return (is_match, similarity_score)"""
-    if inv1 == inv2:
-        return True, 1.0
+FINANCIER_TYPES = (EntityType.FACTOR, EntityType.BANK)
+REF_SIMILARITY_THRESHOLD = 0.75
+AMOUNT_TOLERANCE = 0.005
+MAX_RESUBMIT_GAP = 14 * 86400
 
-    # Normalize: remove common prefixes/suffixes
-    norm1 = inv1.replace("INV_", "").replace("_v2", "").replace("_v3", "")
-    norm2 = inv2.replace("INV_", "").replace("_v2", "").replace("_v3", "")
+def canonical_ref(ref: str) -> str:
+    """INV-2026-0417, INV/2026/417 and inv 2026 417 all canonicalise to INV:2026.417"""
+    upper = ref.upper()
+    prefix = re.match(r"[A-Z]*", upper).group(0)
+    numbers = [str(int(g)) for g in re.findall(r"\d+", upper)]
+    return f"{prefix}:{'.'.join(numbers)}"
 
-    similarity = SequenceMatcher(None, norm1, norm2).ratio()
-    is_match = similarity >= threshold
-    return is_match, similarity
+def ref_similarity(a: str, b: str) -> float:
+    strip = lambda r: re.sub(r"[^A-Z0-9]", "", r.upper())
+    return SequenceMatcher(None, strip(a), strip(b)).ratio()
 
-def compute_duplicate_invoice_match(entity_id: str, entities_dict: Dict, G: MultiDiGraph) -> Tuple[float, List]:
-    """Detect duplicate invoice financing across multiple factors/financiers"""
-    if entity_id not in G:
-        return 0.0, []
+def find_duplicate_financing(entity_id: str, transactions: List[Transaction], entities_dict: Dict) -> List[Dict]:
+    """Pairs of financing requests for what is the same invoice, sent to different financiers."""
+    subs = [
+        tx for tx in transactions
+        if tx.from_entity == entity_id and tx.kind == "financing_request"
+        and tx.to_entity in entities_dict and entities_dict[tx.to_entity].entity_type in FINANCIER_TYPES
+    ]
+    subs.sort(key=lambda t: t.timestamp)
+    buyer_of = {tx.invoice_ref: tx.to_entity for tx in transactions if tx.from_entity == entity_id and tx.kind == "sale"}
+    pairs = []
+    for i in range(len(subs)):
+        for j in range(i + 1, len(subs)):
+            a, b = subs[i], subs[j]
+            if a.to_entity == b.to_entity:
+                continue
+            same_canonical = canonical_ref(a.invoice_ref) == canonical_ref(b.invoice_ref)
+            similarity = ref_similarity(a.invoice_ref, b.invoice_ref)
+            amounts_close = abs(a.amount - b.amount) <= AMOUNT_TOLERANCE * max(a.amount, b.amount)
+            close_in_time = abs(b.timestamp - a.timestamp) <= MAX_RESUBMIT_GAP
+            buyer_a, buyer_b = buyer_of.get(a.invoice_ref), buyer_of.get(b.invoice_ref)
+            same_buyer = buyer_a is not None and buyer_a == buyer_b
+            near_match = similarity >= REF_SIMILARITY_THRESHOLD and amounts_close and close_in_time and same_buyer
+            if same_canonical or near_match:
+                pairs.append({
+                    "ref_a": a.invoice_ref, "ref_b": b.invoice_ref,
+                    "financier_a": a.to_entity, "financier_b": b.to_entity,
+                    "amount_a": a.amount, "amount_b": b.amount,
+                    "ts_a": a.timestamp, "ts_b": b.timestamp,
+                    "similarity": round(similarity, 3),
+                    "canonical_match": same_canonical,
+                })
+    return pairs
 
-    invoices_by_ref = {}
-    suspicious_invoices = []
+def build_sale_adjacency(transactions: List[Transaction]) -> Dict[str, Dict[str, List[Transaction]]]:
+    adj: Dict[str, Dict[str, List[Transaction]]] = {}
+    for tx in transactions:
+        if tx.kind == "sale":
+            adj.setdefault(tx.from_entity, {}).setdefault(tx.to_entity, []).append(tx)
+    return adj
 
-    # Collect all invoices for this exporter across all transactions
-    for src, dst, weight, ts, inv_ref in G._edges:
-        if src == entity_id and inv_ref:
-            if inv_ref not in invoices_by_ref:
-                invoices_by_ref[inv_ref] = []
-            invoices_by_ref[inv_ref].append((dst, weight, ts))
+def find_trade_cycles(entity_id: str, sale_adj: Dict, max_len: int = 4) -> List[Dict]:
+    """Closed loops of sales that start and end at this entity (goods returning to origin)."""
+    cycles, seen = [], set()
 
-    # Look for invoices that appear multiple times to different factors
-    duplicate_count = 0
-    for inv_ref, destinations in invoices_by_ref.items():
-        if len(destinations) >= 2:
-            # Check if destination entities are different factors/banks
-            unique_factors = set()
-            for factor_id, amt, ts in destinations:
-                if factor_id in entities_dict:
-                    entity = entities_dict[factor_id]
-                    if entity.entity_type in [EntityType.FACTOR, EntityType.BANK]:
-                        unique_factors.add(factor_id)
+    def dfs(node, path):
+        for nxt in sale_adj.get(node, {}):
+            if nxt == entity_id and len(path) >= 2:
+                key = frozenset(path)
+                if key not in seen:
+                    seen.add(key)
+                    legs = [(path[k], path[(k + 1) % len(path)]) for k in range(len(path))]
+                    leg_sales = [sale_adj[u][v] for u, v in legs]
+                    cycles.append({
+                        "path": list(path),
+                        "rounds": min(len(s) for s in leg_sales),
+                        "value_cycled": sum(tx.amount for s in leg_sales for tx in s),
+                        "first_leg_values": [tx.amount for tx in sorted(leg_sales[0], key=lambda t: t.timestamp)],
+                    })
+            elif nxt not in path and len(path) < max_len:
+                dfs(nxt, path + [nxt])
 
-            if len(unique_factors) >= 2:
-                duplicate_count += 1
-                total_duplicate_amount = sum(amt for _, amt, _ in destinations)
-                suspicious_invoices.append((inv_ref, unique_factors, total_duplicate_amount))
+    dfs(entity_id, [entity_id])
+    return cycles
 
-    # Score: each duplicate invoice is a major red flag
-    dup_match_score = min((duplicate_count / 1.0) * 100, 100)
-    return dup_match_score, suspicious_invoices
+def compute_circular_trade(cycles: List[Dict]) -> float:
+    if not cycles:
+        return 0.0
+    rounds = max(c["rounds"] for c in cycles)
+    return min(60 + 20 * (rounds - 1), 100)
+
+def compute_duplicate_invoice_match(pairs: List[Dict]) -> Tuple[float, List]:
+    """Headline feature: each invoice financed by two financiers is a major red flag"""
+    suspicious = [(p["ref_a"], {p["financier_a"], p["financier_b"]}, p["amount_a"] + p["amount_b"]) for p in pairs]
+    return min(len(pairs) * 100.0, 100.0), suspicious
 
 def compute_fan_in_out(G: MultiDiGraph, entity_id: str) -> float:
     """Fan-in/fan-out: suspicious when many entities converge on one"""
@@ -258,10 +302,13 @@ def compute_short_cycle(G: MultiDiGraph, entity_id: str) -> float:
     cycle_score = min((strong_cycles / 2.0) * 100, 100)
     return cycle_score
 
-def score_entity(entity: Entity, entities_dict: Dict, G: MultiDiGraph, transactions: List[Transaction]) -> EntityEvidence:
+def score_entity(entity: Entity, entities_dict: Dict, G: MultiDiGraph, transactions: List[Transaction],
+                 sale_adj: Dict = None) -> EntityEvidence:
     """Compute all features and produce risk score + evidence"""
 
-    dup_invoice_score, suspicious_invoices = compute_duplicate_invoice_match(entity.entity_id, entities_dict, G)
+    pairs = find_duplicate_financing(entity.entity_id, transactions, entities_dict)
+    dup_invoice_score, suspicious_invoices = compute_duplicate_invoice_match(pairs)
+    cycles = find_trade_cycles(entity.entity_id, sale_adj if sale_adj is not None else build_sale_adjacency(transactions))
 
     features = {
         "duplicate_invoice_match": dup_invoice_score,
@@ -272,6 +319,7 @@ def score_entity(entity: Entity, entities_dict: Dict, G: MultiDiGraph, transacti
         "kyc_volume_mismatch": compute_kyc_volume_mismatch(entity.declared_volume, G, entity.entity_id),
         "dormancy_burst": compute_dormancy_burst(G, entity.entity_id, transactions),
         "short_cycle": compute_short_cycle(G, entity.entity_id),
+        "circular_trade": compute_circular_trade(cycles),
     }
 
     # Weighted combination
@@ -286,7 +334,9 @@ def score_entity(entity: Entity, entities_dict: Dict, G: MultiDiGraph, transacti
         matched_patterns.append("fan_in_out_concentration")
     if features["dormancy_burst"] > 60:
         matched_patterns.append("dormant_then_active")
-    if features["short_cycle"] > 50:
+    if features["circular_trade"] > 50:
+        matched_patterns.append("circular_trade")
+    elif features["short_cycle"] > 50:
         matched_patterns.append("circular_invoicing")
     if features["velocity"] > 65:
         matched_patterns.append("volume_spike")
@@ -320,7 +370,8 @@ def score_all_entities(entities: List[Entity], transactions: List[Transaction]) 
     """Score all entities and return sorted by risk"""
     entities_dict = {e.entity_id: e for e in entities}
     G = build_transaction_graph(transactions)
-    evidence_list = [score_entity(e, entities_dict, G, transactions) for e in entities]
+    sale_adj = build_sale_adjacency(transactions)
+    evidence_list = [score_entity(e, entities_dict, G, transactions, sale_adj) for e in entities]
     return sorted(evidence_list, key=lambda x: x.risk_score, reverse=True)
 
 if __name__ == "__main__":

@@ -1,274 +1,156 @@
-import os
-import json
 import random
-from pathlib import Path
+import time
+from typing import Dict, List, Literal, Optional
 
-import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Optional, Tuple
-
-from data_gen import generate_dataset, Entity, Transaction
-from scoring import score_all_entities, EntityEvidence
 
 load_dotenv()
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-AGENT_PROMPT = Path(__file__).parent.joinpath("trade_sentinel_prompt.md").read_text()
+import agent  # noqa: E402  (reads GROQ settings after .env is loaded)
+from investigation import Dataset, case_queue, entity_context, input_trace, investigate  # noqa: E402
+from scenarios import build_demo_dataset  # noqa: E402
+from scoring import score_all_entities  # noqa: E402
 
-app = FastAPI(title="Zeyro Trade Sentinel", version="1.0")
+DEFAULT_SEED = 107
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Zeyro Trade Sentinel", version="2.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# Global state
-current_entities: List[Entity] = []
-current_transactions: List[Transaction] = []
-current_evidence: List[EntityEvidence] = []
+state: Dict = {"ds": None, "version": 0, "seed": DEFAULT_SEED}
+feedback: Dict[str, Dict] = {}
 
-class EntityResponse(BaseModel):
-    entity_id: str
-    entity_type: str
-    business_name: str
-    risk_score: float
-    features: Dict[str, float]
-    matched_patterns: List[str]
-    counterparty_entities: List[str]
-    suspicious_invoices: List[Tuple[str, List[str], float]]
 
-class GraphNode(BaseModel):
-    id: str
-    label: str
-    risk_score: float
-    entity_type: str
-    title: str
+def load(seed: int):
+    entities, transactions = build_demo_dataset(seed=seed)
+    evidence = score_all_entities(entities, transactions)
+    state["version"] += 1
+    state["seed"] = seed
+    state["ds"] = Dataset(entities, transactions, evidence, state["version"])
+    feedback.clear()
+    agent.clear_cache()
+    agent.prewarm(prewarm_jobs)
 
-class GraphEdge(BaseModel):
-    source: str
-    target: str
-    amount: float
-    invoice_ref: str
 
-class GraphResponse(BaseModel):
-    nodes: List[GraphNode]
-    edges: List[GraphEdge]
+def ds() -> Dataset:
+    return state["ds"]
+
+
+def prewarm_jobs():
+    d = ds()
+    queue = case_queue(d)
+    for c in queue["alerts"] + queue["monitored"][:1]:
+        if ds().version != d.version:
+            return
+        inv = investigate(d, c["id"], feedback)
+        yield d.version, inv["case"], inv["steps"]
+
+
+def require_exporter(case_id: str):
+    d = ds()
+    if case_id not in d.entities or d.entities[case_id].entity_type.value != "exporter":
+        raise HTTPException(404, "Case not found")
+
 
 @app.on_event("startup")
-def startup_event():
-    """Initialize with synthetic data on startup"""
-    regenerate_data(107)  # Hard-picked seed with clean fraud/normal separation
+def startup():
+    load(DEFAULT_SEED)
 
-def regenerate_data(seed: int):
-    """Regenerate dataset with given seed"""
-    global current_entities, current_transactions, current_evidence
-
-    entities, transactions = generate_dataset(n_normal_exporters=50, n_fraudulent_pairs=2, seed=seed)
-    current_entities = entities
-    current_transactions = transactions
-    current_evidence = score_all_entities(entities, transactions)
 
 @app.get("/health")
-async def health():
-    """Health check"""
-    return {
-        "status": "healthy",
-        "entities": len(current_entities),
-        "transactions": len(current_transactions),
-        "product": "Zeyro Trade Sentinel"
-    }
+def health():
+    d = ds()
+    return {"status": "healthy", "entities": len(d.entities), "transactions": len(d.transactions),
+            "dataset_version": d.version, "product": "Zeyro Trade Sentinel"}
 
-@app.get("/entities")
-async def get_entities(limit: Optional[int] = None) -> List[EntityResponse]:
-    """Get all entities ranked by trade finance risk"""
-    if limit:
-        evidence = current_evidence[:limit]
-    else:
-        evidence = current_evidence
 
-    return [
-        EntityResponse(
-            entity_id=e.entity_id,
-            entity_type=e.entity_type,
-            business_name=e.business_name,
-            risk_score=e.risk_score,
-            features=e.features,
-            matched_patterns=e.matched_patterns,
-            counterparty_entities=e.counterparty_entities,
-            suspicious_invoices=[(inv, list(factors), amt) for inv, factors, amt in e.suspicious_invoices],
-        )
-        for e in evidence
-    ]
+@app.get("/cases")
+def cases():
+    return case_queue(ds())
 
-@app.get("/entities/{entity_id}")
-async def get_entity_details(entity_id: str) -> Dict:
-    """Get full Trade Sentinel evidence for one entity"""
-    for evidence in current_evidence:
-        if evidence.entity_id == entity_id:
-            return {
-                "entity_id": evidence.entity_id,
-                "entity_type": evidence.entity_type,
-                "business_name": evidence.business_name,
-                "risk_score": evidence.risk_score,
-                "features": evidence.features,
-                "matched_patterns": evidence.matched_patterns,
-                "counterparty_entities": evidence.counterparty_entities,
-                "suspicious_invoices": [(inv, list(factors), amt) for inv, factors, amt in evidence.suspicious_invoices],
-                "is_fraudulent": evidence.is_fraudulent,
-                "risk_category": "HIGH_RISK" if evidence.risk_score > 70 else "MEDIUM_RISK" if evidence.risk_score > 40 else "LOW_RISK",
-            }
 
-    raise HTTPException(status_code=404, detail="Entity not found")
+@app.get("/cases/{case_id}")
+def case_detail(case_id: str):
+    require_exporter(case_id)
+    return investigate(ds(), case_id, feedback)
 
-@app.get("/graph")
-async def get_graph(limit: Optional[int] = 50) -> GraphResponse:
-    """Get graph data for Trade Sentinel visualization (top N entities by risk)"""
-    top_evidence = current_evidence[:limit]
-    top_entities = {e.entity_id for e in top_evidence}
 
-    # Build nodes with entity type coloring
-    nodes = [
-        GraphNode(
-            id=e.entity_id,
-            label=e.entity_id.replace("EXP_", "E").replace("IMP_", "I").replace("BNK_", "B").replace("FCT_", "F").replace("FRAUD_", "F!"),
-            risk_score=e.risk_score,
-            entity_type=e.entity_type,
-            title=f"{e.business_name}: Trade Risk {e.risk_score:.1f}"
-        )
-        for e in top_evidence
-    ]
+@app.get("/cases/{case_id}/inputs")
+def case_inputs(case_id: str):
+    require_exporter(case_id)
+    return input_trace(ds(), case_id)
 
-    # Build edges from transactions
-    edges = []
-    seen_edges = set()
 
-    for tx in current_transactions:
-        if tx.from_entity in top_entities and tx.to_entity in top_entities:
-            edge_key = (tx.from_entity, tx.to_entity)
-            if edge_key not in seen_edges:
-                edges.append(GraphEdge(
-                    source=tx.from_entity,
-                    target=tx.to_entity,
-                    amount=tx.amount,
-                    invoice_ref=tx.invoice_ref
-                ))
-                seen_edges.add(edge_key)
+@app.get("/entities/{entity_id}/context")
+def context(entity_id: str, case: str):
+    d = ds()
+    if entity_id not in d.entities:
+        raise HTTPException(404, "Entity not found")
+    require_exporter(case)
+    return entity_context(d, entity_id, case)
 
-    return GraphResponse(nodes=nodes, edges=edges)
 
-import time
+class ChatMessage(BaseModel):
+    role: str
+    content: str
 
-WORKFLOW_PHASES = {
-    "Counterparty": "Counterparty Intelligence (Before Approval)",
-    "Transaction": "Transaction Intelligence (During Processing)",
-    "Early Warning": "Behavioural Early Warning (During Monitoring)",
-    "Investigation": "Explainable Investigation (When an Anomaly Appears)",
-}
 
-investigation_cache = {}  # {(entity_id, workflow): (note, timestamp)}
-CACHE_TTL = 120  # 2 minutes
+class ChatRequest(BaseModel):
+    case_id: str
+    step: int
+    mode: Literal["narrate", "ask"] = "narrate"
+    message: Optional[str] = None
+    history: List[ChatMessage] = []
 
-class InvestigateRequest(BaseModel):
-    workflow: str = "Investigation"
 
-@app.post("/investigate/{entity_id}")
-async def investigate(entity_id: str, req: InvestigateRequest):
-    """Generate a live investigation note by calling the Trade Sentinel agent (Groq) on current evidence"""
-    if not GROQ_API_KEY:
-        raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured on the server")
+@app.post("/chat")
+def chat(req: ChatRequest):
+    require_exporter(req.case_id)
+    d = ds()
+    inv = investigate(d, req.case_id, feedback)
+    steps = inv["steps"]
+    if not 0 <= req.step < len(steps):
+        raise HTTPException(400, "Invalid step")
+    if req.mode == "narrate":
+        return {**agent.narrate(d.version, inv["case"], steps, req.step), "step": req.step}
+    if not req.message or not req.message.strip():
+        raise HTTPException(400, "Message required")
+    out = agent.answer(d.version, inv["case"], steps, req.step, req.message, [m.model_dump() for m in req.history])
+    return {**out, "step": out["goto"]}
 
-    evidence = next((e for e in current_evidence if e.entity_id == entity_id), None)
-    if evidence is None:
-        raise HTTPException(status_code=404, detail="Entity not found")
 
-    phase = WORKFLOW_PHASES.get(req.workflow, WORKFLOW_PHASES["Investigation"])
+class FeedbackRequest(BaseModel):
+    case_id: str
+    verdict: Literal["confirm", "dismiss", "escalate"]
 
-    cache_key = (entity_id, req.workflow)
-    now = time.time()
-    if cache_key in investigation_cache:
-        cached_note, cached_time = investigation_cache[cache_key]
-        if now - cached_time < CACHE_TTL:
-            return {
-                "entity_id": entity_id,
-                "workflow": req.workflow,
-                "note": cached_note,
-                "model": GROQ_MODEL,
-                "cached": True,
-            }
 
-    evidence_payload = {
-        "entity_id": evidence.entity_id,
-        "entity_type": evidence.entity_type,
-        "business_name": evidence.business_name,
-        "risk_score": round(evidence.risk_score, 1),
-        "features": {k: round(v, 2) for k, v in evidence.features.items()},
-        "matched_patterns": evidence.matched_patterns,
-        "counterparty_entities": evidence.counterparty_entities,
-        "suspicious_invoices": [
-            {"invoice_ref": inv, "factors": list(factors), "amount": amt}
-            for inv, factors, amt in evidence.suspicious_invoices
-        ],
-    }
+@app.post("/feedback")
+def post_feedback(req: FeedbackRequest):
+    require_exporter(req.case_id)
+    ev = ds().evidence[req.case_id]
+    feedback[req.case_id] = {"verdict": req.verdict, "patterns": ev.matched_patterns, "at": time.time()}
+    return {"ok": True, "case_id": req.case_id, "verdict": req.verdict}
 
-    user_content = (
-        f"Workflow phase requested: {phase}\n\n"
-        f"Live behavioral evidence for this entity (computed just now from the current synthetic dataset):\n"
-        f"{json.dumps(evidence_payload, indent=2)}\n\n"
-        f"Write the investigation note for this entity in the '{phase}' template. "
-        f"Use only the evidence given above — do not invent facts."
-    )
 
-    try:
-        resp = requests.post(
-            GROQ_URL,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": GROQ_MODEL,
-                "messages": [
-                    {"role": "system", "content": AGENT_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                "temperature": 0.2,
-            },
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        note = data["choices"][0]["message"]["content"]
-    except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Groq call failed: {exc}")
+@app.get("/feedback")
+def get_feedback():
+    return {cid: f["verdict"] for cid, f in feedback.items()}
 
-    investigation_cache[cache_key] = (note, time.time())
-    return {
-        "entity_id": entity_id,
-        "workflow": req.workflow,
-        "note": note,
-        "model": GROQ_MODEL,
-        "cached": False,
-    }
 
 @app.post("/regenerate")
-async def regenerate(seed: Optional[int] = None):
-    """Regenerate dataset with optional seed"""
-    if seed is None:
-        seed = random.randint(1, 100000)
+def regenerate(seed: Optional[int] = None):
+    """Reshuffle the random background companies. Scripted scenarios stay, all scores are recomputed."""
+    load(seed if seed is not None else random.randint(1, 100000))
+    return {"seed": state["seed"], "dataset_version": state["version"]}
 
-    regenerate_data(seed)
 
-    return {
-        "message": "Trade Sentinel dataset regenerated",
-        "seed": seed,
-        "entities": len(current_entities),
-        "transactions": len(current_transactions),
-    }
+@app.post("/reset")
+def reset():
+    load(DEFAULT_SEED)
+    return {"seed": DEFAULT_SEED, "dataset_version": state["version"]}
+
 
 if __name__ == "__main__":
     import uvicorn

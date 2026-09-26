@@ -18,7 +18,12 @@ class Entity:
     declared_volume: float
     is_fraudulent: bool = False
     fraud_patterns: List[str] = None
+    location: str = ""
+    business: str = ""
+    scenario: str = ""
 
+# kind: financing_request (exporter -> financier), funding (financier -> exporter),
+# sale (seller -> buyer, goods invoiced), settlement (buyer -> payee)
 @dataclass
 class Transaction:
     tx_id: str
@@ -28,6 +33,7 @@ class Transaction:
     invoice_ref: str
     timestamp: int
     is_flagged: bool = False
+    kind: str = "financing_request"
 
 def generate_duplicate_invoice_pair(base_invoice_id: str, exporter_id: str, factor1_id: str, factor2_id: str,
                                      amount: float, timestamp: int, variation: str = "exact") -> List[Transaction]:
@@ -120,7 +126,8 @@ def generate_dataset(n_normal_exporters: int = 50, n_fraudulent_pairs: int = 2, 
                 to_entity=exporter.entity_id,
                 amount=amount * 0.95,  # fee deducted
                 invoice_ref=invoice_id,
-                timestamp=current_time + random.randint(0, 86400*30)
+                timestamp=current_time + random.randint(0, 86400*30),
+                kind="funding",
             ))
             tx_counter += 1
 
@@ -182,7 +189,8 @@ def generate_dataset(n_normal_exporters: int = 50, n_fraudulent_pairs: int = 2, 
                     to_entity=exporter.entity_id,
                     amount=amount * 0.95,
                     invoice_ref=base_invoice_id,
-                    timestamp=current_time + random.randint(0, 86400*30)
+                    timestamp=current_time + random.randint(0, 86400*30),
+                    kind="funding",
                 ))
                 tx_counter += 1
 

@@ -1,0 +1,345 @@
+# Zeyro Trade Sentinel — Capabilities & Demo Guide
+
+Trade Sentinel is an AI fraud investigator for trade finance. It links exporters, buyers, factors and banks into one transaction graph. It scores every exporter for fraud patterns that document checks miss. Then an AI agent walks the analyst through each flagged case, step by step, in a chat. The graph highlights the evidence as the agent explains it.
+
+> All companies, invoices and trades are **synthetic**. Every score, finding and chat reply is computed from the data on each run; nothing is pre-written.
+
+---
+
+## 1. What it can do
+
+| Capability | What it does | Where it lives |
+|---|---|---|
+| **Duplicate invoice financing** | Finds one invoice financed by two different financiers, even when the reference is reformatted (`INV-2026-0417` vs `INV/2026/417`) | `scoring.py` → `find_duplicate_financing` |
+| **Circular trade detection** | Finds closed loops of sales (A → B → C → A) where goods never reach a real outside buyer | `scoring.py` → `find_trade_cycles` |
+| **Behavioural risk score (0–100)** | Combines the two fraud patterns with 7 behavioural signals: counterparty concentration, velocity, pass-through, network position, declared-vs-actual volume, dormancy, back-and-forth flows | `scoring.py` → `score_entity` |
+| **Case queue** | Ranks exporters, shows alerts (score ≥ 50) with a one-line reason, and groups members of the same loop into one case | `investigation.py` → `case_queue` |
+| **6-step investigation** | For any exporter: profile → financing history → duplicate check → loop check → buyer payment check → verdict. Each step is a real computation with its own graph highlight | `investigation.py` → `investigate` |
+| **AI investigator chat** | Explains each step in plain English, answers free-form questions, and jumps ahead when the answer lives in a later step | `agent.py`, prompt in `trade_sentinel_prompt.md` |
+| **Click-to-explain graph** | Clicking a financier, buyer or bank adds its side of the story to the chat. Clicking a line shows the invoices behind it | `investigation.py` → `entity_context`, `frontend/src/App.jsx` |
+| **Inputs view** | One screen showing where data enters on a trade-finance marketplace (modelled on RXIL Global's ITFS flow): onboarding → limits → invoice upload → bids → funding → repayment. Shows the real records for a chosen case, marks where its fraud enters, and which investigation step reads each input | `investigation.py` → `input_trace`, `frontend/src/components/InputsView.jsx` |
+| **Analyst feedback loop** | Confirm / Escalate / Dismiss is recorded. Future verdicts on the same fraud pattern show how analysts ruled | `api.py` → `/feedback` |
+| **Stress test & training** | Tests the engine on thousands of random synthetic exporters, including deliberate look-alikes. Trains a model that adds the investigation's evidence to the engine's signals, and saves it with its metrics | `notebooks/trade_sentinel_conviction.ipynb` → `models/` |
+
+---
+
+## 2. How it works
+
+```
+Synthetic trade events ──► Transaction graph ──► Risk engine ──► Case queue
+ (scenarios.py +             (sales, financing,     (patterns +       │
+  random background)          funding, payments)     9 signals)       ▼
+                                                        6-step investigation (computed)
+                                                                      │
+                                                     Trade Sentinel agent (Groq LLM)
+                                                     narrates + answers questions
+                                                                      │
+                                                     Chat + highlighted graph (React)
+```
+
+**Who does what:**
+- **The engine** (Python, deterministic) finds the fraud and computes every number: matches, amounts, dates, exposure, loop routes, scores.
+- **The agent** (LLM) explains those findings in plain language and answers questions about them. The prompt tells it to use only the findings it's given and never invent facts.
+- **The UI** shows the step's evidence on the graph (red = flagged in this step) and lets the analyst drill in by clicking.
+
+**Data model.** Four transaction kinds:
+- `sale`: seller → buyer, goods invoiced
+- `financing_request`: exporter → financier
+- `funding`: financier → exporter, paid at 95% (90% for bank LCs)
+- `settlement`: buyer → payee
+
+**Where the inputs come from.** This follows the flow of a cross-border invoice on a trade-finance marketplace, modelled on RXIL Global's ITFS. The **Inputs** screen in the app shows this table with each case's real records.
+
+| # | Marketplace stage | Who submits | Our record | Investigation step that reads it | Status |
+|---|---|---|---|---|---|
+| 1 | Onboarding (KYC · KYB · AML) | Marketplace onboards exporter and importer | company profile: name, type, location, business, declared turnover | Review the company · volume vs declared | Used |
+| 2 | Limits | Financier: exposure per importer, with/without cover, min–max spread | none | Limit utilisation | **Not used yet** |
+| 3 | Invoice upload (trade factoring unit) | Exporter or importer, manual upload; importer accepts | `sale` | Where the goods went · sale behind each financing | Used (supporting documents **not used yet**) |
+| 4 | Bids & financing | Financiers bid within their limits | `financing_request` | Invoices financed twice (the headline check) | Used |
+| 5 | Funding | Financier pays the exporter | `funding` | Money at risk | Used |
+| 6 | Repayment at maturity | Buyer pays the financier | `settlement` | What the buyer paid | Used |
+
+**Why the view has to span every marketplace, bank and factor.** Each financier sees only its own book. In Case A, Meridian and Harbourline each hold one clean-looking invoice. The duplicate only appears when both books sit side by side. Today, invoices reach ITFS by manual upload with no custom APIs (its site lists API/SFTP). Trade Sentinel needs the same four record types from every source, as a daily file or feed. The demo uses synthetic records in exactly that shape.
+
+**Duplicate matching rules** (stated assumptions):
+1. Invoice numbers are normalised: separators, leading zeros and letter case are ignored. `INV-2026-0417`, `INV/2026/417` and `inv 2026 417` are the same invoice, and that is always a match.
+2. A merely *similar* reference (≥ 75% string similarity) counts only if it also has the **same buyer**, an **amount within 0.5%**, and was **submitted within 14 days**. Without these conditions, consecutive invoice numbers (…0405, …0406) would be flagged falsely.
+3. The two submissions must go to **different** financiers.
+
+**Circular trade rule.** A loop of 2–4 traders whose sales return to the starting company. The score rises with each lap: one lap = 60, four laps = 100.
+
+**Score weights.** Duplicate financing 0.35, circular trade 0.30, counterparty concentration 0.18, velocity 0.16, pass-through 0.12, network position 0.10, volume vs declared 0.05, dormancy 0.02, back-and-forth 0.02. The total is capped at 100.
+
+**Risk bands:**
+- **> 70:** escalate
+- **40–70:** review if a fraud pattern is present, otherwise monitor
+- **< 40:** clear
+
+**Reliability safeguards** (the free Groq tier allows 8,000 tokens/minute):
+- Short prompts; each call is about 1,000 tokens.
+- Narration for the demo cases is generated **at startup**, one call every 7 seconds, and cached. On stage every step appears instantly.
+- If `gpt-oss-120b` is rate-limited, the backend switches to `gpt-oss-20b`, which has a separate limit.
+- If Groq is unreachable, the chat still answers with a sentence built from the same computed findings, labelled *"Offline"*.
+- The footer of every chat message shows where it came from: `Live · model`, `cached`, or `Offline`.
+
+---
+
+## 3. Running it
+
+```bash
+# one-time setup
+uv venv venv && uv pip install --python venv/bin/python -r requirements.txt
+cd frontend && npm install && cd ..
+echo "GROQ_API_KEY=gsk_..." > .env
+
+# run (two terminals)
+venv/bin/python -m uvicorn api:app --port 8000
+cd frontend && npm run dev          # → http://localhost:5173
+```
+
+### Pre-flight checklist (do this 5 minutes before judging)
+- [ ] Start the backend **at least 3 minutes before** you present. The startup pre-caching takes about 2 minutes.
+- [ ] Open http://localhost:5173. It auto-opens **Tapti Loom Exports**.
+- [ ] Click through Tapti's six steps once. Every message footer should read `Live · … · cached`.
+- [ ] Click **Inputs** in the top bar and check all six stage cards load with Tapti's records. Stage 4 should be outlined red: "Fraud enters here".
+- [ ] Refresh the page so the demo starts clean at step 1. After a refresh the app opens on **Investigations**; you'll switch to **Inputs** at 0:45.
+- [ ] **Do not press "Reset demo"** or restart the backend after this. Both clear the cache and the analyst decisions.
+- [ ] Open the slide in another tab. Browser zoom 100%, window at least 1440 px wide.
+
+---
+
+## 4. Demo flow (7 minutes)
+
+| Time | Screen | What you show |
+|---|---|---|
+| 0:00 – 0:45 | Slide | The $1.8B PNB fraud: trade finance is a network problem, not a document problem |
+| 0:45 – 1:15 | App · **Inputs** | Where the data comes from: six marketplace steps; "fraud enters here" on step 4 for Tapti |
+| 1:15 – 3:15 | App · **Case A** | Same invoice, two financiers: the headline catch (click "Investigate Tapti Loom Exports →") |
+| 3:15 – 5:00 | App · **Case B** | Goods going in circles: a pattern invoice checking can't see |
+| 5:00 – 5:45 | App · **Case C** | Big and clean: the engine doesn't flag every busy exporter |
+| 5:45 – 7:00 | Slide | Precedent (IFSCA, MonetaGo, FlowScope), assumptions, land → expand |
+
+**Two screens, switched from the top bar:**
+- **Inputs:** where the data comes from, one stage per card, with the chosen case's real records.
+- **Investigations:** the working screen.
+  - **Left:** case queue.
+  - **Centre:** the case's graph.
+  - **Right:** the agent chat, with a progress bar of six steps.
+  - **"Next: …"** (black pill) moves the investigation forward.
+  - **Typing a question** gets an answer. If the answer is in a later step, the flow jumps there.
+
+**If time runs short:** skip the optional clicks first, then say one line per "nothing found" step (Case A step 4, Case B step 3). Never skip Case C: it answers the false-positive question before it's asked.
+
+---
+
+### Inputs screen · "Where the data comes from" (0:45 – 1:15)
+
+**Purpose.** Before the fraud, show judges where each piece of data enters. The rest of the demo then reads as "the engine joins these inputs", not a black box.
+
+| Point at | Say this |
+|---|---|
+| The six cards, left to right | "This is how a cross-border invoice moves through a marketplace like RXIL Global's ITFS: onboarding, limits, invoice upload, bids, funding, repayment." |
+| Stage 2 (dashed, *Not used yet*) and the documents note in stage 3 | "Grey means we don't use it yet. Limits and trade documents are next. We're explicit about what the demo reads." |
+| Stage 4, red, **Fraud enters here**, with two red records `INV-2026-0417` → Meridian and `INV/2026/417` → Harbourline | "Tapti's fraud enters here: the same invoice, won by two financiers." |
+| Bottom-right panel | Read it: "Each financier saw one clean invoice on its own book. Only a view across both books links them." |
+| **Investigate Tapti Loom Exports →** | Click it. The app switches to the Tapti investigation at step 1 |
+
+**The screen changes with the case.** The case picker (top right) reloads everything from the data:
+- **Opaline Gems:** the red outline moves to stage 3, because a loop enters through the sale records, and the loop's sales show in red.
+- **Northstar:** no outline and no red records. The panel reads "The inputs line up, so nothing is flagged."
+
+It's a good way to replay Case B or C in ten seconds if a judge asks "where did that come from?"
+
+**How it's happening.** `GET /cases/{id}/inputs` → `input_trace()` in `investigation.py` groups the case's transactions by kind: `sale`, `financing_request`, `funding`, `settlement`. Buyer repayments go to the financier rather than the exporter, so they're matched by the invoice's normalised number. Rows are flagged if they belong to a duplicate pair or a loop. The stage descriptions are fixed text in `InputsView.jsx`; every record, count and the bottom-right sentence come from the data.
+
+---
+
+### Case A — Tapti Loom Exports · "Same invoice, two financiers"
+
+**Story.** Tapti Loom Exports is a cotton fabric exporter in Surat. It has three months of clean history. Then it ships **one** $552,000 order to Crescent Bay Trading in Dubai. It finances the invoice with **Meridian Factor Co.** as `INV-2026-0417` on 12 May. Two days later it finances it again with **Harbourline Trade Finance**, reformatted as `INV/2026/417`. The buyer pays Meridian once. Harbourline's **$524,400** is never coming back.
+
+**Queue card:** risk **71** (red) · "Invoice INV-2026-0417 financed by 2 financiers". You arrive here from the Inputs screen's **Investigate** button. The app also opens here by default.
+
+| Step | Click | Graph shows | What the engine computed | Say this |
+|---|---|---|---|---|
+| 1 · Review the company | (auto) | Tapti outlined | Declared $3.2M/yr; 8 invoices financed ($2.34M, 73% of declared) across 3 financiers; 2 buyers | "The agent starts like an analyst would: who is this company?" |
+| 2 · Financing history | Next | Lines to all 3 financiers in red | Last 8 financing requests, split by financier | "Eight invoices, three financiers. Nothing obviously wrong yet." |
+| 3 · Invoices financed twice | Next | **Only Meridian and Harbourline** in red | Invoice numbers normalised, then compared across financiers. `INV-2026-0417` = `INV/2026/417`, 2 days apart, same $552,000. Each financier paid out $524,400 | "Same invoice, different formatting, two financiers. An exact-match system misses this." |
+| 4 · Where the goods went | Next | Nothing red | 7 sale records, no loop | "It also checks for circular trade. None here, so it doesn't invent concern." |
+| 5 · What the buyer paid | Next | Crescent Bay → Meridian payment in red | 1 shipment recorded, $1,104,000 financing raised, buyer paid $552,000 to Meridian only. **Harbourline left unpaid** | "This is the proof: one shipment, two loans, one repayment." |
+| 6 · Verdict | Next | Both financing lines red | Score 71.4 HIGH · $524,400 at risk · freeze new financing, alert the financiers | Click **Confirm fraud**. The queue card now reads *Analyst: Confirmed fraud* |
+
+**Good clicks and questions for this case:**
+- Click **Harbourline** node → "Financed INV/2026/417 on 14 May… **the buyer has NOT repaid this financier**", with the flagged invoices in red.
+- Click **Crescent Bay** node → "Received goods for INV-2026-0417 once ($552,000), yet Tapti raised $1,104,000 of financing on it."
+- At step 3, type *"Did the buyer pay for this shipment?"* → the agent answers from step 5 and **the flow jumps to step 5**. This shows the agent is reasoning over the investigation, not reading a script.
+- *"Could this be legitimate refinancing?"* → answered from the evidence: the second financier would have been repaid.
+
+**How it's happening.** `find_duplicate_financing` compares every pair of Tapti's financing requests sent to different financiers. `canonical_ref()` turns both references into `INV:2026.417`. `investigate()` then finds the funding each financier paid, and the buyer's settlement for that invoice.
+
+---
+
+### Case B — Opaline Gems · "Goods going in circles"
+
+**Story.** Three diamond traders form a ring: **Opaline Gems** (Mumbai) → **Starfield Diamonds** (Antwerp) → **Veridian Jewels** (Hong Kong) → back to Opaline. The goods went round **four times**, with a ~2% markup on each hop so every invoice looks new. **Coastal Commerce Bank** financed every leg. Nobody outside the ring ever buys anything. No single invoice is a duplicate, so an invoice check finds nothing. Only the network view shows the loop.
+
+**Queue card:** risk **66** (amber) · "Goods loop through 3 traders, 4 rounds" · *+ linked: Starfield Diamonds, Veridian Jewels*. The three ring members are grouped into one case.
+
+| Step | Click | Graph shows | What the engine computed | Say this |
+|---|---|---|---|---|
+| 1 · Review the company | click the Opaline card | Opaline outlined | Declared $2.5M/yr but **$5.26M financed (210%)**; one financier; one buyer | "Financing twice its declared business. Worth a look, not proof." |
+| 2 · Financing history | Next | Opaline → Coastal in red | 4 invoices, `OPL-001` $1.20M → `OPL-004` $1.43M, all to Coastal | — |
+| 3 · Invoices financed twice | Next | Nothing red | 4 invoices checked, **0 duplicates** | "Every invoice is unique. A document or duplicate check says this company is fine." |
+| 4 · Where the goods went | Next | **The triangle of sales** in red | Loop: Opaline → Starfield → Veridian → Opaline · 4 rounds · $16.09M of invoices cycled · +19.5% value growth · **0 sales outside the loop** | "The goods come back to where they started, and they grow in value on paper each lap. This is the PNB pattern." |
+| 5 · What the buyer paid | Next | Starfield → Opaline payment | All payers are inside the loop; 0 from outside | "No real end customer. The money goes round the loop too." |
+| 6 · Verdict | Next | Loop + bank highlighted | 66.2 · circular trade · value cycled $16.09M · escalate for review with trade documents | Click **Escalate** |
+
+**Good clicks and questions for this case:**
+- Click **Coastal Commerce Bank** → "Financed 12 invoices inside the loop, worth $16,094,508 in total." The bank is the victim.
+- Type *"Why does a closed loop matter?"* → the agent explains trade-based money laundering and credit inflation.
+- ⚠️ Clicking **Starfield** or **Veridian** *opens that company's case*, because they are exporters. That's a nice optional beat: the same loop, seen from another member. Don't do it by accident mid-flow.
+- On the **Inputs** screen with Opaline picked, stage 3 (invoice upload) is outlined instead of stage 4. This fraud enters through the sale records, not the financing.
+
+**Why the score is 66 and not 71+.** A loop is strong evidence of trade-based laundering, but it needs trade documents to confirm. So the engine says **"escalate for review"** rather than "freeze". That's a deliberate distinction worth saying out loud.
+
+**How it's happening.** `build_sale_adjacency` builds the seller → buyer graph from sale records. `find_trade_cycles` searches from Opaline, up to 4 hops, for a path that returns to Opaline. Rounds = the minimum number of sales on any leg. The investigation then counts sales and payments that leave the ring.
+
+---
+
+### Case C — Northstar Agro Exports · "Big and clean"
+
+**Story.** Northstar Agro Exports is a grapes and onions exporter in Nashik, and the busiest exporter in the dataset. It has **18 invoices** to **four** real buyers (Rotterdam, Riyadh, Singapore, London), each financed once through Meridian or Keystone, and **every one paid by its buyer**. It shares financiers with Tapti, which shows the engine judges behaviour, not who you bank with.
+
+**Queue card:** under *Largest exporters · no alerts*. Pill shows **40** in green (exact score 39.6). The headline shows its weak signal, "Concentrated counterparties".
+
+| Step | Click | What the engine computed | Say this |
+|---|---|---|---|
+| 1 · Review | click the Northstar card | $9.5M declared, $6.49M financed (68%), 2 financiers, 4 buyers | "Our biggest exporter. Lots of activity." |
+| 2–4 | Next ×3 | 18 invoices · **0 duplicates** · **0 loops** | "Same checks, nothing found." |
+| 5 · Buyer | Next | **18 of 18 invoices paid by 4 different buyers** (all 4 buyers light up) | "Money flows like real trade." |
+| 6 · Verdict | Next | 39.6 LOW · weak signals only (concentration, quiet-then-active) · **Clear** | Click **Agree: clear** |
+
+**Good click:** **Meridian Factor Co.** → "Ordinary relationship with Northstar: 18 transactions, nothing unusual." It's the same financier that was part of the fraud in Case A.
+
+**Why this case matters.** Judges will ask about false positives. Here, being busy and concentrated raises the score a little, but with no fraud pattern the verdict is still *clear*. The agent explains that, and the analyst can agree with one click.
+
+**How it's happening.** Same six steps and same code as A and B; only the data differs. That's the point: nothing is special-cased per company.
+
+---
+
+## 5. Stress test & training (conviction notebook)
+
+The demo shows three hand-written cases. [`notebooks/trade_sentinel_conviction.ipynb`](notebooks/trade_sentinel_conviction.ipynb) asks the harder question: **does the engine hold up on companies it has never seen, including ones built to fool it?**
+
+**What it does:**
+1. Generates **30 random synthetic portfolios**: 2,374 exporters, 514 of them fraudulent. Every company has the full trade lifecycle: sale, financing, funding, buyer payment.
+2. Disguises the fraud in different ways:
+   - duplicate invoices with the second reference `exact`, `reformatted` (`inv 2026 417`), with a `suffix` (`…0417A`, `…0417/1`) or `transposed` (`…0471`)
+   - trading rings of 2–4 members, 1–4 laps, half of them mixed with genuine outside trade
+3. Plants **360 "hard negatives"**: honest companies that look suspicious.
+   - **standing orders:** repeat orders to one buyer, same amount, consecutive invoice numbers, alternating financiers
+   - **reciprocal pairs:** two honest companies that buy from each other and also sell to outsiders
+   - **very high-volume exporters**
+4. Measures the **production engine unchanged**.
+5. Trains models, always scored on portfolios they never saw (cross-validation grouped by portfolio):
+   - logistic regression and gradient boosting on the engine's 9 signals
+   - gradient boosting on the engine signals **plus 7 evidence features** taken from the investigation steps: was the invoice financed twice, was the buyer's money ever received, is there a real sale behind each financed invoice, how many laps does the loop make, how much of the loop's trade goes to outside buyers, financed vs declared volume
+6. Checks the trained model against the three demo cases, then saves `models/trade_sentinel_gb.joblib` and `models/conviction_metrics.json`.
+
+**Results** (out-of-portfolio):
+
+| | Precision | Recall | False alarms | Frauds missed |
+|---|---|---|---|---|
+| Engine today (typology flag) | 60% | 86% | 292 | 70 |
+| Trained model: engine signals only | 90% | 65% | 37 | 179 |
+| Trained model: engine + investigation evidence | 90% | 100% | 57 | 1 |
+
+**Where each fraud variant and look-alike lands:**
+
+| | Engine today | Trained (engine + evidence) |
+|---|---|---|
+| Duplicate · exact / reformatted | 100% caught | 100% caught |
+| Duplicate · suffix | 70% caught | 100% caught |
+| Duplicate · transposed digits | **12% caught** | 100% caught |
+| Trading ring · pure / mixed | 100% / 100% caught | 100% / 99% caught |
+| Standing orders (honest) | **100% wrongly flagged** | 3% wrongly flagged |
+| Reciprocal pairs (honest) | **100% wrongly flagged** | 26% wrongly flagged |
+| High-volume exporters (honest) | 12% wrongly flagged | 1% wrongly flagged |
+| Ordinary exporters (honest) | 3% wrongly flagged | 1% wrongly flagged |
+
+**What it proves:**
+- **The core patterns are reliable.** Every exact or reformatted duplicate and every trading loop was caught, across all 30 portfolios.
+- **It found three blind spots** that the scripted demo can't show:
+  - invoice references that share no number with the original (transposed digits, extra numeric suffix)
+  - standing orders mistaken for disguised duplicates
+  - honest two-way trade mistaken for a two-company loop
+- **The investigation's evidence fixes most of them.** The buyer-payment and matching-sale checks the chat already walks through are exactly what separates fraud from look-alikes. Folding them into the risk score is the next engine change, once the demo build is unfrozen.
+- **The trained model agrees with the demo.** It flags Tapti and all three ring members and clears Northstar, having never seen them.
+
+**Read these before quoting numbers:**
+- **The 100% recall is optimistic.** The strongest evidence features mirror how the generator creates fraud: an extra financing with no sale behind it, and a buyer who pays once. Quote the direction, not the exact figure.
+- **The engine's 60% precision is harsh on purpose.** Look-alikes are 15% of this test set, far more than a real portfolio would have.
+- **The trained model flags all 40 background companies in the live demo.** Those companies come from `data_gen.py`, which records financing only, with no sale or buyer payment. The model reads "financed, no sale, never repaid" as fraud. That's a data-completeness lesson for deployment: partners must provide sales, financing **and** settlement data. It says nothing new about those companies.
+- **Some learned weights reflect the simulation.** For example, velocity gets a big weight because ring members trade unusually often here. Use the learned weights to challenge the hand-set ones, not to replace them.
+- **The saved model is not wired into the app.** The live demo runs the rule engine, which the agent can explain step by step.
+
+**Pitch line that holds up:**
+> "We stress-tested the engine on 2,300 synthetic exporters, including 360 designed to fool it. The core fraud patterns were caught every time, and we found the look-alikes it confuses. Using the evidence our investigation already gathers fixes most of those."
+
+**Retrain it:**
+```bash
+uv pip install --python venv/bin/python -r requirements-notebook.txt
+venv/bin/python -m ipykernel install --sys-prefix --name trade-sentinel --display-name "Trade Sentinel (venv)"
+```
+Open the notebook, select the **Trade Sentinel (venv)** kernel, change the **Config** cell, and run all cells. It takes about 2 minutes for 30 portfolios.
+- `N_PORTFOLIOS` sets the training size.
+- `N_DUP` / `N_RINGS` set the fraud mix.
+- `N_STANDING` / `N_RECIPROCAL` / `N_BIG` set the look-alikes.
+- `DUP_VARIANTS`, `AMOUNT_JITTER` and `GAP_DAYS` set how hard the disguises are.
+
+Use this kernel rather than the global `python3` one: on this machine that kernel points at another project's venv.
+
+---
+
+## 6. Q&A prep
+
+| Likely question | Answer |
+|---|---|
+| **Is the AI output scripted?** | No. The engine computes the findings from the data, and the LLM explains them at run time. The footer on each message shows the model and whether it was cached. Ask it anything. |
+| **What are your assumptions?** | Synthetic data only. Invoice normalisation plus a ≥ 75% similarity rule (with same buyer, ±0.5% amount, ≤ 14 days). Bands: > 70 escalate, 40–70 review/monitor, < 40 clear. |
+| **Did you only test on your three demo cases?** | No. We stress-tested on 2,374 unseen synthetic exporters, including 360 honest look-alikes (§5). Core patterns were caught 100% of the time, and we know exactly which look-alikes confuse the rules. |
+| **How do you avoid false positives?** | Today: the strict near-match rule (§2), and Case C shows a busy but honest exporter cleared. But the stress test shows standing orders and honest two-way trade still get flagged. The fix is folding the buyer-payment and matching-sale evidence into the score; in testing, standing-order false alarms fell from 100% to 3%. |
+| **Is there any ML, or just rules?** | Rules find and explain the case; every flag is traceable. The notebook trains a gradient-boosting model on the rule signals plus investigation evidence. It raises precision from 60% to 90% on the stress test. The plan is ML to rank, rules to explain. |
+| **How would you get real training data?** | Historical cases from factoring partners and TReDS platforms: confirmed double-financing write-offs as positives, settled invoices as negatives. The notebook's pipeline takes them as they are, as long as sales, financing and payments are all present. |
+| **Why is Northstar so close to 40?** | Honest answer: the behavioural signals (concentration, activity bursts) are weak and noisy. The verdict depends on the fraud patterns, which is why it's cleared. Tuning those signals on real data is the next step. |
+| **Where does your data come from?** | The same four records every marketplace already has: invoice, financing, funding, buyer repayment (the Inputs screen). We need them from **every** marketplace, bank and factor, not one, because double financing only shows across books. |
+| **How would you integrate with a marketplace like ITFS?** | A daily file or feed of those four record types. ITFS takes invoices by manual upload today with no custom APIs, but lists API/SFTP. We don't need write access or changes to their workflow. |
+| **Doesn't the marketplace catch duplicates already?** | We don't know each platform's internal checks. The structural point stands: one platform or financier sees only its own book. Tapti's two financings sit with two different financiers, so no single book contains the duplicate. |
+| **What about limits and trade documents?** | Not used yet, and marked that way on the Inputs screen. Next: compare financing against each importer's limit, and cross-check bill-of-lading numbers across financings. |
+| **Why not blockchain?** | we.trade, Marco Polo and TradeLens failed because they needed every bank to adopt shared infrastructure. MonetaGo has succeeded since 2018 as a lightweight overlay on existing systems. We follow that model. |
+| **How is this different from MonetaGo?** | MonetaGo fingerprints invoices to catch duplicates. We do that *and* the network patterns (loops, concentration) that fingerprinting can't see, with an agent that explains every case. |
+| **What's next?** | Land: trade and counterparty risk for factors and banks. Expand: fraud/AML monitoring, then portfolio early warning, then a platform. |
+
+**Known limits** (say these before you're asked):
+- The data is synthetic.
+- Behavioural signal thresholds aren't tuned on real portfolios.
+- Known rule blind spots, from the stress test: transposed invoice numbers, standing orders, honest two-way trade.
+- Marketplace inputs not used yet: financier limits, importer acceptance as a separate record, and supporting trade documents (PO, bill of lading, packing list, certificate of origin).
+- The trained model is evaluated but not yet used by the live app.
+- Analyst feedback is stored in memory only (it resets on restart).
+- The agent's quality depends on the free Groq tier's rate limits.
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| "Cannot reach the Trade Sentinel API" | Backend not running: `venv/bin/python -m uvicorn api:app --port 8000` |
+| Message footer says **Offline** | Groq is unreachable or rate-limited on both models. The content is still correct (built from the findings). Wait ~60 s, then ask again |
+| Footer says `gpt-oss-20b` | The main model was rate-limited and the fallback worked. Nothing to do |
+| First narration is slow | Pre-caching hadn't finished. Start the backend ≥ 3 min before presenting |
+| Graph looks cramped | Drag nodes; they stay where you put them |
+| Inputs screen stuck on "Loading…" | The backend is older than the Inputs feature. Restart it, then wait ~2 min for pre-caching before presenting |
+| Inputs screen too tall / scrolls | Window narrower than 1440 px or browser zoom above 100%. Reset zoom (⌘0) |
+| Want a fresh start | Refresh the browser (keeps the cache). "Reset demo" also clears the cache and analyst decisions |
