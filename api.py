@@ -10,7 +10,7 @@ from pydantic import BaseModel
 load_dotenv()
 
 import agent  # noqa: E402  (reads GROQ settings after .env is loaded)
-from investigation import Dataset, case_queue, entity_context, input_trace, investigate  # noqa: E402
+from investigation import Dataset, case_queue, entity_context, input_trace, investigate, trade_request  # noqa: E402
 from scenarios import build_demo_dataset  # noqa: E402
 from scoring import score_all_entities  # noqa: E402
 
@@ -81,6 +81,12 @@ def case_detail(case_id: str):
 def case_inputs(case_id: str):
     require_exporter(case_id)
     return input_trace(ds(), case_id)
+
+
+@app.get("/cases/{case_id}/request")
+def case_request(case_id: str):
+    require_exporter(case_id)
+    return trade_request(ds(), case_id)
 
 
 @app.get("/entities/{entity_id}/context")
