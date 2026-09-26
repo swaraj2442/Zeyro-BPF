@@ -297,6 +297,7 @@ def investigate(ds: Dataset, eid: str, feedback: Dict[str, Dict]) -> Dict:
     return {
         "case": case_summary(ds, ev),
         "steps": steps,
+        "outputs": case_outputs(ds, eid, action),
         "graph": case_graph(ds, eid, set(dup_edges + loop_edges), {p["ref_a"] for p in pairs} | {p["ref_b"] for p in pairs}),
         "dataset_version": ds.version,
     }
@@ -455,3 +456,126 @@ def input_trace(ds: Dataset, eid: str) -> Dict:
         "records": {k: {"count": len(v), "examples": v[:3]} for k, v in by_kind.items()},
         "story": story,
     }
+
+
+# ---------------------------------------------------------------------------------------
+# Case outputs: what the product hands to people, derived from the findings by typology rules
+# ---------------------------------------------------------------------------------------
+
+def _act(owner, action, evidence, when, notice=False):
+    return {"owner": owner, "action": action, "evidence": evidence, "when": when, "notice": notice}
+
+
+def case_outputs(ds: Dataset, eid: str, decision: str) -> Dict:
+    e = ds.entities[eid]
+    ev = ds.evidence[eid]
+    name = e.business_name
+    txs = ds.txns(eid)
+    sales = [t for t in txs if t.kind == "sale" and t.from_entity == eid]
+    reqs = [t for t in txs if t.kind == "financing_request" and t.from_entity == eid]
+    repaid = {(t.to_entity, canonical_ref(t.invoice_ref)) for t in ds.transactions if t.kind == "settlement"}
+    pairs = find_duplicate_financing(eid, ds.transactions, ds.entities)
+    cycles = find_trade_cycles(eid, ds.sale_adj)
+    actions, watch, evidence_pack = [], [], []
+    at_risk = {"amount": "$0", "held_by": "nobody", "basis": "no fraud pattern found"}
+
+    if pairs:
+        p = pairs[0]
+        key = canonical_ref(p["ref_a"])
+        shipped = [t for t in sales if canonical_ref(t.invoice_ref) == key]
+        buyer = ds.name(shipped[0].to_entity) if shipped else "the buyer"
+        unpaid = [f for f in (p["financier_a"], p["financier_b"]) if (f, key) not in repaid]
+        paid = [f for f in (p["financier_a"], p["financier_b"]) if f not in unpaid]
+        exposure = 0.0
+        for f, ref in ((p["financier_a"], p["ref_a"]), (p["financier_b"], p["ref_b"])):
+            if f in unpaid:
+                funding = _funding_for(ds, f, eid, ref)
+                exposure += funding.amount if funding else 0.0
+        dup_refs = {canonical_ref(x["ref_a"]) for x in pairs}
+        other_open = [t for t in reqs if (t.to_entity, canonical_ref(t.invoice_ref)) not in repaid and canonical_ref(t.invoice_ref) not in dup_refs]
+        victims = ", ".join(ds.name(f) for f in unpaid) or "none yet"
+        at_risk = {"amount": money(exposure), "held_by": victims,
+                   "basis": f"funded {p['ref_b']}, but {buyer} repaid only {', '.join(ds.name(f) for f in paid) or 'nobody'}"}
+        actions.append(_act(f"Credit risk · every financier of {name}", f"Freeze new financing requests from {name}",
+                            f"{p['ref_a']} and {p['ref_b']} are the same invoice, financed by {ds.name(p['financier_a'])} and {ds.name(p['financier_b'])}", "Now"))
+        for f in unpaid:
+            actions.append(_act(ds.name(f), f"Stop further drawdowns to {name} and start recovery of {money(exposure)}",
+                                f"{buyer} repaid the same invoice to {', '.join(ds.name(x) for x in paid) or 'nobody'}; this financier will not be repaid", "Today", notice=True))
+        for f in paid:
+            n_other = sum(1 for t in reqs if t.to_entity == f and canonical_ref(t.invoice_ref) != key)
+            actions.append(_act(ds.name(f), f"Review the other {n_other} invoices it financed for {name}",
+                                f"the invoice it financed ({p['ref_a']}) was financed again elsewhere", "This week", notice=True))
+        actions.append(_act("Operations", f"Request the bill of lading and invoice copy for {p['ref_a']}; confirm with {buyer} it received one shipment",
+                            f"{len(shipped)} shipment recorded against {len(pairs) + 1} financings", "Today"))
+        if other_open:
+            actions.append(_act("Credit risk", f"Re-check {len(other_open)} other unrepaid financings worth {money(sum(t.amount for t in other_open))}",
+                                "a company that double-financed once may have done it elsewhere", "This week"))
+        actions.append(_act("Compliance", "Prepare a suspicious transaction report if the documents confirm the duplicate",
+                            "same invoice financed twice with a reformatted reference", "After documents"))
+        watch += [f"Block any new financing from {name} whose invoice number normalises to {p['ref_a']}",
+                  f"Check every new {name} invoice against all financiers' books before funding"]
+        evidence_pack += [f"Sale: {t.invoice_ref} to {buyer}, {money(t.amount)}, {fmt_date(t.timestamp)}" for t in shipped]
+        for f, ref, amt, ts in ((p["financier_a"], p["ref_a"], p["amount_a"], p["ts_a"]), (p["financier_b"], p["ref_b"], p["amount_b"], p["ts_b"])):
+            funding = _funding_for(ds, f, eid, ref)
+            paid_out = f"{ds.name(f)} paid out {money(funding.amount)} on {fmt_date(funding.timestamp)}" if funding else "not yet funded"
+            evidence_pack.append(f"Financing request: {ref} to {ds.name(f)} for {money(amt)} on {fmt_date(ts)}; {paid_out}")
+        evidence_pack += [f"Repayment: {buyer} → {ds.name(t.to_entity)}, {money(t.amount)}, {fmt_date(t.timestamp)}"
+                          for t in ds.transactions if t.kind == "settlement" and canonical_ref(t.invoice_ref) == key]
+
+    elif cycles:
+        c = max(cycles, key=lambda x: x["rounds"])
+        ring = c["path"]
+        names = ", ".join(ds.name(m) for m in ring)
+        ring_set = set(ring)
+        loop_reqs = [t for m in ring for t in ds.txns(m) if t.kind == "financing_request" and t.from_entity == m]
+        lenders = sorted({t.to_entity for t in loop_reqs})
+        funded = sum(t.amount for m in ring for t in ds.txns(m) if t.kind == "funding" and t.to_entity == m and t.from_entity in lenders)
+        vals = c["first_leg_values"]
+        growth = (vals[-1] / vals[0] - 1) if len(vals) > 1 else 0.0
+        outside = sum(1 for m in ring for b in ds.sale_adj.get(m, {}) if b not in ring_set)
+        lender_names = ", ".join(ds.name(l) for l in lenders)
+        at_risk = {"amount": money(funded), "held_by": lender_names,
+                   "basis": f"financing paid against {len(loop_reqs)} invoices that went round a closed loop"}
+        actions.append(_act(f"Credit risk · {lender_names}", f"Pause new financing to all {len(ring)} loop members: {names}",
+                            f"goods went round {c['rounds']} times with {outside} sales to anyone outside the loop", "Now"))
+        for l in lenders:
+            n = sum(1 for t in loop_reqs if t.to_entity == l)
+            actions.append(_act(ds.name(l), f"Treat {n} financed invoices ({money(sum(t.amount for t in loop_reqs if t.to_entity == l))}) as one connected exposure, not {len(ring)} separate clients",
+                                f"each client's buyer is the next member of the same loop", "Today", notice=True))
+        sample = ", ".join(sorted({t.invoice_ref for t in loop_reqs})[:3])
+        actions.append(_act("Operations", f"Request bills of lading and shipping records for {sample} to confirm the goods physically moved",
+                            f"invoice value grew {growth:.1%} across the laps with no new buyer", "Today"))
+        actions.append(_act("KYB / onboarding", f"Check {names} for shared directors, addresses or bank accounts",
+                            "they trade only with each other", "This week"))
+        actions.append(_act("Compliance", "Assess for trade-based money laundering; report if shipping records don't match",
+                            f"{money(c['value_cycled'])} of invoices cycled", "After documents"))
+        watch += [f"Link {names} as one group: flag any new invoice between them",
+                  "Alert if a new lap starts (goods return to the first company again)"]
+        evidence_pack += [f"Loop: {' → '.join(ds.name(n) for n in ring + [ring[0]])}, {c['rounds']} laps",
+                          f"Invoices cycled: {money(c['value_cycled'])}, value growth {growth:.1%}",
+                          f"Sales to buyers outside the loop: {outside}",
+                          f"Financing inside the loop: {len(loop_reqs)} invoices from {lender_names}"]
+
+    else:
+        settled = sum(1 for t in sales if (any(x.to_entity for x in reqs if x.invoice_ref == t.invoice_ref)) and
+                      any((x.to_entity, canonical_ref(t.invoice_ref)) in repaid for x in reqs if x.invoice_ref == t.invoice_ref))
+        buyer_counts = {}
+        for t in sales:
+            buyer_counts[t.to_entity] = buyer_counts.get(t.to_entity, 0) + t.amount
+        top_buyer, top_amt = max(buyer_counts.items(), key=lambda kv: kv[1]) if buyer_counts else (None, 0.0)
+        share = top_amt / sum(buyer_counts.values()) if buyer_counts else 0.0
+        verb = "Monitor" if ev.risk_score > 40 else "Clear"
+        actions.append(_act("Credit risk", f"{verb}: keep financing {name} on standard terms",
+                            f"{settled} of {len(sales)} invoices repaid by {len(buyer_counts)} buyers; 0 duplicates; 0 loops", "Now"))
+        actions.append(_act("Financiers", "No alert sent", "nothing in the data suggests another financier is exposed", "n/a"))
+        if top_buyer:
+            actions.append(_act("Monitoring", f"Re-score if one buyer passes 50% of volume (today {ds.name(top_buyer)}: {share:.0%})",
+                                "concentration is the main weak signal on this company", "Ongoing"))
+        watch += [f"Standard monthly re-score of {name}", "Re-open automatically if any invoice is financed twice or a sales loop appears"]
+        evidence_pack += [f"{len(reqs)} financings, {len(sales)} sales, {settled} repaid",
+                          f"Buyers: {', '.join(ds.name(b) for b in buyer_counts)}"]
+
+    for i, a in enumerate(actions, 1):
+        a["priority"] = i
+    return {"decision": decision, "score": round(ev.risk_score, 1), "band": risk_band(ev.risk_score),
+            "money_at_risk": at_risk, "actions": actions, "watch": watch, "evidence_pack": evidence_pack}

@@ -162,6 +162,35 @@ def answer(version: int, case: Dict, steps: List[Dict], index: int, question: st
                 "goto": index, "source": "offline", "model": None, "error": str(exc), "cached": False}
 
 
+def draft_notice(version: int, case: Dict, outputs: Dict, index: int) -> Dict:
+    """Write the notice for one action (e.g. to an affected financier) from the computed case outputs."""
+    action = outputs["actions"][index]
+    key = ("notice", version, case["id"], index)
+    with _lock:
+        if key in _cache:
+            return {**_cache[key], "cached": True}
+    facts = {"case": {k: case[k] for k in ("name", "location", "business", "risk_score", "headline")},
+             "recipient": action["owner"], "requested_action": action["action"], "evidence": action["evidence"],
+             "deadline": action["when"], "money_at_risk": outputs["money_at_risk"], "evidence_pack": outputs["evidence_pack"]}
+    try:
+        out = _call_groq([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "Write a short notice from Zeyro Trade Sentinel's fraud desk to the recipient below. "
+                                        "Plain text, under 110 words: a one-line subject starting 'Subject:', then what we found, "
+                                        "what we ask them to do and by when, and the key evidence as 2-3 short lines starting with '- '. "
+                                        "Use only these facts, no invented names or numbers, and no signature block.\n\n"
+                                        + json.dumps(facts, indent=1)},
+        ])
+        result = {"reply": out["content"], "source": "live", "model": out["model"]}
+        with _lock:
+            _cache[key] = result
+    except AgentUnavailable as exc:
+        result = {"reply": f"Subject: {case['name']}: {action['action']}\n\nTo {action['owner']}: {action['action']} ({action['when']}).\n"
+                           f"- Why: {action['evidence']}\n- Money at risk: {outputs['money_at_risk']['amount']}",
+                  "source": "offline", "model": None, "error": str(exc)}
+    return {**result, "cached": False}
+
+
 def clear_cache():
     with _lock:
         _cache.clear()

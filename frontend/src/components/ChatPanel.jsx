@@ -2,14 +2,69 @@ import { useEffect, useRef, useState } from 'react';
 import { marked } from 'marked';
 
 const escapeHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const md = (text) => marked.parse(escapeHtml(text || ''));
+const md = (text, opts) => marked.parse(escapeHtml(text || ''), opts);
 
 function sourceLabel(m) {
   if (m.source === 'live') return `Live · ${m.model}${m.cached ? ' · cached' : ''}`;
   return 'Offline · written from the computed findings, model unreachable';
 }
 
-function Message({ m }) {
+function OutputsCard({ o, busy, onDraft }) {
+  return (
+    <div className="out">
+      <div className="out-head">
+        <span className="kicker">Trade Sentinel output · what the product hands to your team</span>
+        <span className={`score ${o.band}`}>{Math.round(o.score)}</span>
+      </div>
+      <div className="out-decision">{o.decision}</div>
+      <div className="out-risk">
+        <div>
+          <span>Money at risk</span>
+          <b>{o.money_at_risk.amount}</b>
+        </div>
+        <div>
+          <span>Held by</span>
+          <b className="held">{o.money_at_risk.held_by}</b>
+        </div>
+        <div className="basis">{o.money_at_risk.basis}</div>
+      </div>
+      <div className="out-label">Actions, in order</div>
+      <ol className="out-actions">
+        {o.actions.map((a, i) => (
+          <li key={i}>
+            <div className="act-title">{a.action}</div>
+            <div className="act-meta">
+              <span className="owner">{a.owner}</span>
+              <span className="when">{a.when}</span>
+            </div>
+            <div className="act-why">Why: {a.evidence}</div>
+            {a.notice && (
+              <button className="btn act-btn" disabled={busy} onClick={() => onDraft(i, a.owner)}>
+                Draft notice to {a.owner} →
+              </button>
+            )}
+          </li>
+        ))}
+      </ol>
+      <div className="out-label">Monitoring rules created</div>
+      <ul className="out-list">
+        {o.watch.map((w) => (
+          <li key={w}>{w}</li>
+        ))}
+      </ul>
+      <details className="out-pack">
+        <summary>Evidence pack · {o.evidence_pack.length} records</summary>
+        <ul className="out-list">
+          {o.evidence_pack.map((e) => (
+            <li key={e}>{e}</li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
+function Message({ m, busy, onDraft }) {
   if (m.type === 'step') {
     return <div className="step-marker">Step {m.index + 1} · {m.title}</div>;
   }
@@ -53,12 +108,22 @@ function Message({ m }) {
       </div>
     );
   }
+  if (m.type === 'outputs') return <OutputsCard o={m.outputs} busy={busy} onDraft={onDraft} />;
+  if (m.type === 'notice') {
+    return (
+      <div className="card notice">
+        <div className="kicker">Draft notice · to {m.to}</div>
+        <div className="notice-body" dangerouslySetInnerHTML={{ __html: md(m.text, { breaks: true }) }} />
+        <div className="meta">{sourceLabel(m)} · review before sending</div>
+      </div>
+    );
+  }
   if (m.type === 'note') return <div className="msg" style={{ color: 'var(--text-muted)', fontSize: 12.5 }}>{m.text}</div>;
   return null;
 }
 
 export default function ChatPanel({
-  caseInfo, stepIdx, steps, messages, busy, suggestions, isLast, verdictGiven, onSend, onNext, onVerdict,
+  caseInfo, stepIdx, steps, messages, busy, suggestions, isLast, verdictGiven, onSend, onNext, onVerdict, onDraft,
 }) {
   const clean = caseInfo?.band === 'LOW';
   const [draft, setDraft] = useState('');
@@ -99,7 +164,7 @@ export default function ChatPanel({
       <div className="thread" ref={threadRef}>
         {!caseInfo && <div className="empty">Pick a case on the left and I'll investigate it step by step.</div>}
         {messages.map((m) => (
-          <Message key={m.id} m={m} />
+          <Message key={m.id} m={m} busy={busy} onDraft={onDraft} />
         ))}
         {busy && (
           <div className="typing">

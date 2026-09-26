@@ -11,7 +11,7 @@ const SUGGESTIONS = {
   duplicates: () => ["How do you know it's the same invoice?", 'Could this be legitimate refinancing?'],
   loop: () => ['Why does a closed loop matter?'],
   buyer: () => ['Who loses money here?'],
-  verdict: () => ['What should I do first?'],
+  verdict: () => ['What should I do first?', 'Who needs to be told?'],
 };
 
 const VERDICT_TEXT = { confirm: 'Confirmed as fraud', escalate: 'Escalated to the fraud team', dismiss: 'Cleared: no fraud' };
@@ -30,6 +30,7 @@ export default function App() {
   const [view, setView] = useState('investigate');
   const idRef = useRef(0);
   const runRef = useRef(0);
+  const outputsShownRef = useRef(-1);
 
   const push = useCallback((...msgs) => {
     setMessages((prev) => [...prev, ...msgs.map((m) => ({ ...m, id: ++idRef.current }))]);
@@ -89,6 +90,27 @@ export default function App() {
 
   const steps = detail?.steps || [];
   const isLast = steps.length > 0 && stepIdx === steps.length - 1;
+
+  useEffect(() => {
+    if (!detail || busy || !isLast || outputsShownRef.current === runRef.current) return;
+    outputsShownRef.current = runRef.current;
+    push({ type: 'outputs', outputs: detail.outputs });
+  }, [detail, busy, isLast, push]);
+
+  const handleDraft = async (index, owner) => {
+    const caseId = activeId;
+    const run = runRef.current;
+    setBusy(true);
+    try {
+      const res = await api.notice(caseId, index);
+      if (runRef.current !== run) return;
+      push({ type: 'notice', to: owner, text: res.reply, source: res.source, model: res.model, cached: res.cached });
+    } catch (e) {
+      push({ type: 'note', text: `Couldn't draft the notice: ${e.message}` });
+    } finally {
+      if (runRef.current === run) setBusy(false);
+    }
+  };
 
   const goTo = (target) => {
     const markers = [];
@@ -289,6 +311,7 @@ export default function App() {
             onSend={handleSend}
             onNext={handleNext}
             onVerdict={handleVerdict}
+            onDraft={handleDraft}
           />
         </div>
       )}

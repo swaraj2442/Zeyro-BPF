@@ -22,6 +22,7 @@ export const api = {
   context: (entityId, caseId) => request(`/entities/${entityId}/context?case=${caseId}`),
   narrate: (caseId, step) => post('/chat', { case_id: caseId, step, mode: 'narrate' }),
   ask: (caseId, step, message, history) => post('/chat', { case_id: caseId, step, mode: 'ask', message, history }),
+  notice: (caseId, action) => post('/notice', { case_id: caseId, action }),
   feedback: (caseId, verdict) => post('/feedback', { case_id: caseId, verdict }),
   feedbackMap: () => request('/feedback'),
   reset: () => post('/reset'),

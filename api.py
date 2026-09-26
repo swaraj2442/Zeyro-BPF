@@ -121,6 +121,20 @@ def chat(req: ChatRequest):
     return {**out, "step": out["goto"]}
 
 
+class NoticeRequest(BaseModel):
+    case_id: str
+    action: int
+
+
+@app.post("/notice")
+def notice(req: NoticeRequest):
+    require_exporter(req.case_id)
+    inv = investigate(ds(), req.case_id, feedback)
+    if not 0 <= req.action < len(inv["outputs"]["actions"]) or not inv["outputs"]["actions"][req.action]["notice"]:
+        raise HTTPException(400, "No notice for this action")
+    return agent.draft_notice(ds().version, inv["case"], inv["outputs"], req.action)
+
+
 class FeedbackRequest(BaseModel):
     case_id: str
     verdict: Literal["confirm", "dismiss", "escalate"]
