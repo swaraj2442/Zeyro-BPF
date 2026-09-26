@@ -52,14 +52,32 @@ function OutputsCard({ o, busy, onDraft }) {
           <li key={w}>{w}</li>
         ))}
       </ul>
-      <details className="out-pack">
-        <summary>Evidence pack · {o.evidence_pack.length} records</summary>
-        <ul className="out-list">
-          {o.evidence_pack.map((e) => (
-            <li key={e}>{e}</li>
-          ))}
-        </ul>
-      </details>
+      {o.evidence_categorized ? (
+        <>
+          <div className="out-label">Evidence pack</div>
+          {Object.entries(o.evidence_categorized).map(([cat, items]) =>
+            items.length > 0 && (
+              <details key={cat} className="evidence-category" open>
+                <summary>{cat} · {items.length}</summary>
+                <ul className="out-list">
+                  {items.map((e) => (
+                    <li key={e}>{e}</li>
+                  ))}
+                </ul>
+              </details>
+            )
+          )}
+        </>
+      ) : (
+        <details className="out-pack">
+          <summary>Evidence pack · {o.evidence_pack.length} records</summary>
+          <ul className="out-list">
+            {o.evidence_pack.map((e) => (
+              <li key={e}>{e}</li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   );
 }
@@ -96,7 +114,7 @@ function Message({ m, busy, onDraft }) {
               {c.rows.map((r, i) => (
                 <tr key={i} className={r.flagged ? 'flagged' : ''}>
                   {r.cells.map((cell, j) => (
-                    <td key={j} className={j === r.cells.length - 1 ? 'num' : ''}>
+                    <td key={j} className={j === r.cells.length - 1 ? 'amt' : ''}>
                       {cell}
                     </td>
                   ))}

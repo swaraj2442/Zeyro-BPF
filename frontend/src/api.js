@@ -19,6 +19,7 @@ export const api = {
   cases: () => request('/cases'),
   caseDetail: (id) => request(`/cases/${id}`),
   inputs: (id) => request(`/cases/${id}/inputs`),
+  tradeRequest: (id) => request(`/cases/${id}/request`),
   context: (entityId, caseId) => request(`/entities/${entityId}/context?case=${caseId}`),
   narrate: (caseId, step) => post('/chat', { case_id: caseId, step, mode: 'narrate' }),
   ask: (caseId, step, message, history) => post('/chat', { case_id: caseId, step, mode: 'ask', message, history }),

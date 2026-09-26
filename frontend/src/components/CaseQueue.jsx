@@ -11,6 +11,12 @@ function CaseCard({ c, active, status, onOpen }) {
       <div className="headline">{c.headline}</div>
       {c.linked && <div className="linked">+ linked: {c.linked.join(', ')}</div>}
       {status && <div className="status">Analyst: {STATUS[status]}</div>}
+      {status && (
+        <div className="monitoring">
+          <span className="monitoring-dot" />
+          Monitoring active
+        </div>
+      )}
     </button>
   );
 }

@@ -4,6 +4,7 @@ import CaseQueue from './components/CaseQueue';
 import CaseGraph, { TYPE_LABEL } from './components/CaseGraph';
 import ChatPanel from './components/ChatPanel';
 import InputsView from './components/InputsView';
+import RequestsView from './components/RequestsView';
 
 const SUGGESTIONS = {
   profile: (band) => [band === 'LOW' ? 'Why is this company not flagged?' : 'Why was this company flagged?'],
@@ -238,6 +239,7 @@ export default function App() {
           <span className="chip">Synthetic data only</span>
         </div>
         <div className="switch">
+          <button className={view === 'requests' ? 'on' : ''} onClick={() => setView('requests')}>Requests</button>
           <button className={view === 'investigate' ? 'on' : ''} onClick={() => setView('investigate')}>Investigations</button>
           <button className={view === 'inputs' ? 'on' : ''} onClick={() => setView('inputs')}>Inputs</button>
         </div>
@@ -253,6 +255,15 @@ export default function App() {
 
       {error ? (
         <div className="empty">{error}</div>
+      ) : view === 'requests' ? (
+        <RequestsView
+          queue={queue}
+          caseId={activeId}
+          onInvestigate={(id) => {
+            setView('investigate');
+            if (id !== activeId) openCase(id);
+          }}
+        />
       ) : view === 'inputs' ? (
         <InputsView
           queue={queue}

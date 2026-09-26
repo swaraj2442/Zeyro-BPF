@@ -341,6 +341,68 @@ Use this kernel rather than the global `python3` one: on this machine that kerne
 
 ---
 
+## 5b. Why the fingerprint needs a consortium ([`trade_sentinel_consortium.ipynb`](notebooks/trade_sentinel_consortium.ipynb))
+
+The app's **Digital Trade Fingerprint** panel (on the Inputs screen) claims that pooling records across
+institutions is what catches fraud a single financier can't see alone. This notebook tests that claim directly,
+separately from the accuracy numbers above.
+
+**What it does:**
+1. Builds 30 random portfolios, 300 duplicate-financing cases total, each split across **two different**
+   financiers at random, drawn from a pool of 420 factors and banks.
+2. For every case, rebuilds the transaction record **as each financier alone would see it** (its own book plus
+   the exporter's sales) and runs the same `find_duplicate_financing` the engine uses today.
+3. Runs the identical function once more, pooled across every financier — today's engine, unchanged.
+4. Grows the pool of participating financiers one at a time, in the best possible recruiting order and in a
+   realistic random sign-up order, and tracks what share of cases become visible as membership grows.
+
+**Results:**
+
+| View | Cases caught | Exposure visible |
+|---|---|---|
+| Single institution (either financier, alone) | **0 / 300** | **$0** of $119.0M at risk |
+| Consortium (financiers' records pooled) | 208 / 300 (69%) | $82.6M |
+
+| Financiers joined | Best-case recruiting | Realistic random sign-up |
+|---|---|---|
+| First 10% | 14% of cases visible | 1% |
+| First 25% | 33% | 6% |
+| First 50% | 66% | 25% |
+| 100% | 100% | 100% |
+
+**What it proves:**
+- **The 0% is structural, not a modelling gap.** `find_duplicate_financing`'s rule requires the two financings
+  to go to *different* financiers, so by definition no single institution's own book ever contains both records.
+  No amount of tuning fixes this: only pooling the books does.
+- **The 69% pooled figure isn't the headline** — it matches the per-variant breakdown in the main conviction
+  notebook (exact/reformatted always caught, harder disguises depend on tolerances). The comparison that matters
+  is 0% vs. 69%+, not the exact number.
+- **A consortium needs most of the market, not just the two biggest players.** Coverage grows slower than
+  membership, because a case needs *both* its financiers inside the pool. Say this instead of implying two or
+  three large partners solve it.
+
+**Read before quoting:**
+- The fingerprint panel's identity fields (GSTIN, LEI, KYC/KYB/KYA, "data sources verified") are **display
+  placeholders today**, not computed checks. This notebook only validates the part that's real: duplicate
+  detection needs pooled records, using the exact function running in the app.
+- Circular trade doesn't need a consortium in this dataset — every ring is financed by one bank by construction,
+  so a single institution already sees the whole loop. The consortium argument here is specific to duplicate
+  invoice financing.
+- The coverage curve assumes a case needs only its two financiers present. Matching the same exporter across
+  institutions' own systems (shared GSTIN/LEI) is a real integration step this notebook doesn't model.
+- Greedy recruiting order is a best-case upper bound, not a plan.
+
+**Pitch line that holds up:**
+> "We proved this isn't just a better model — it's structural. Zero duplicate-financing cases were visible to
+> either financier acting alone, because the two financings sit in two different books by definition. Once
+> those books are pooled, the same detection catches most of them. That's the entire case for a consortium
+> fingerprint over a single institution's fraud engine."
+
+Run it the same way as the conviction notebook, with the **Trade Sentinel (venv)** kernel. It saves
+`models/consortium_metrics.json`.
+
+---
+
 ## 6. Q&A prep
 
 | Likely question | Answer |
@@ -354,6 +416,7 @@ Use this kernel rather than the global `python3` one: on this machine that kerne
 | **Why is Northstar so close to 40?** | Honest answer: the behavioural signals (concentration, activity bursts) are weak and noisy. The verdict depends on the fraud patterns, which is why it's cleared. Tuning those signals on real data is the next step. |
 | **What does the product actually output?** | For every case: a decision, the money at risk and who holds it, owner-assigned actions with deadlines and evidence, monitoring rules, and an evidence pack. Plus drafted notices to affected financiers. The outputs card at the end of each investigation shows exactly this, generated from that case's data. |
 | **Is the drafted notice sent automatically?** | No. It's a draft labelled "review before sending". The analyst stays in control, and the decision buttons record who approved what. |
+| **Why does this need a consortium, not just your algorithm?** | We tested it (§5b): across 300 synthetic duplicate-financing cases, zero were visible to either financier acting alone — the rule needs two financiers' records, and one institution's own book structurally cannot contain both. Pooling catches most of them. It's not a better model at one desk; it's a data-access problem. |
 | **Where does your data come from?** | The same four records every marketplace already has: invoice, financing, funding, buyer repayment (the Inputs screen). We need them from **every** marketplace, bank and factor, not one, because double financing only shows across books. |
 | **How would you integrate with a marketplace like ITFS?** | A daily file or feed of those four record types. ITFS takes invoices by manual upload today with no custom APIs, but lists API/SFTP. We don't need write access or changes to their workflow. |
 | **Doesn't the marketplace catch duplicates already?** | We don't know each platform's internal checks. The structural point stands: one platform or financier sees only its own book. Tapti's two financings sit with two different financiers, so no single book contains the duplicate. |

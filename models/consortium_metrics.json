@@ -1,0 +1,20 @@
+{
+  "cases_tested": 300,
+  "single_institution_recall": 0.0,
+  "consortium_recall": 0.6933333333333334,
+  "exposure_at_risk_total": 119044728.27,
+  "exposure_visible_once_pooled": 82648114.9,
+  "financiers_in_pool": 420,
+  "coverage_at_10pct_financiers": {
+    "greedy": 0.12,
+    "random": 0.008999999999999998
+  },
+  "coverage_at_25pct_financiers": {
+    "greedy": 0.31333333333333335,
+    "random": 0.06241666666666669
+  },
+  "coverage_at_50pct_financiers": {
+    "greedy": 0.6133333333333333,
+    "random": 0.25483333333333336
+  }
+}
