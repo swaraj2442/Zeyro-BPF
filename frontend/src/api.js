@@ -6,9 +6,16 @@ async function get(path) {
   return res.json();
 }
 
-async function post(path) {
-  const res = await fetch(`${BASE_URL}${path}`, { method: 'POST' });
-  if (!res.ok) throw new Error(`API error ${res.status}: ${path}`);
+async function post(path, body) {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: 'POST',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.detail || `API error ${res.status}: ${path}`);
+  }
   return res.json();
 }
 
@@ -18,4 +25,5 @@ export const api = {
   entity: (id) => get(`/entities/${id}`),
   graph: (limit = 60) => get(`/graph?limit=${limit}`),
   regenerate: (seed) => post(`/regenerate${seed ? `?seed=${seed}` : ''}`),
+  investigate: (id, workflow) => post(`/investigate/${id}`, { workflow }),
 };

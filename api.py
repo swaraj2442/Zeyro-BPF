@@ -1,10 +1,24 @@
+import os
+import json
+import random
+from pathlib import Path
+
+import requests
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Tuple
+
 from data_gen import generate_dataset, Entity, Transaction
 from scoring import score_all_entities, EntityEvidence
-import random
+
+load_dotenv()
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+AGENT_PROMPT = Path(__file__).parent.joinpath("trade_sentinel_prompt.md").read_text()
 
 app = FastAPI(title="Zeyro Trade Sentinel", version="1.0")
 
@@ -149,6 +163,97 @@ async def get_graph(limit: Optional[int] = 50) -> GraphResponse:
                 seen_edges.add(edge_key)
 
     return GraphResponse(nodes=nodes, edges=edges)
+
+import time
+
+WORKFLOW_PHASES = {
+    "Counterparty": "Counterparty Intelligence (Before Approval)",
+    "Transaction": "Transaction Intelligence (During Processing)",
+    "Early Warning": "Behavioural Early Warning (During Monitoring)",
+    "Investigation": "Explainable Investigation (When an Anomaly Appears)",
+}
+
+investigation_cache = {}  # {(entity_id, workflow): (note, timestamp)}
+CACHE_TTL = 120  # 2 minutes
+
+class InvestigateRequest(BaseModel):
+    workflow: str = "Investigation"
+
+@app.post("/investigate/{entity_id}")
+async def investigate(entity_id: str, req: InvestigateRequest):
+    """Generate a live investigation note by calling the Trade Sentinel agent (Groq) on current evidence"""
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured on the server")
+
+    evidence = next((e for e in current_evidence if e.entity_id == entity_id), None)
+    if evidence is None:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    phase = WORKFLOW_PHASES.get(req.workflow, WORKFLOW_PHASES["Investigation"])
+
+    cache_key = (entity_id, req.workflow)
+    now = time.time()
+    if cache_key in investigation_cache:
+        cached_note, cached_time = investigation_cache[cache_key]
+        if now - cached_time < CACHE_TTL:
+            return {
+                "entity_id": entity_id,
+                "workflow": req.workflow,
+                "note": cached_note,
+                "model": GROQ_MODEL,
+                "cached": True,
+            }
+
+    evidence_payload = {
+        "entity_id": evidence.entity_id,
+        "entity_type": evidence.entity_type,
+        "business_name": evidence.business_name,
+        "risk_score": round(evidence.risk_score, 1),
+        "features": {k: round(v, 2) for k, v in evidence.features.items()},
+        "matched_patterns": evidence.matched_patterns,
+        "counterparty_entities": evidence.counterparty_entities,
+        "suspicious_invoices": [
+            {"invoice_ref": inv, "factors": list(factors), "amount": amt}
+            for inv, factors, amt in evidence.suspicious_invoices
+        ],
+    }
+
+    user_content = (
+        f"Workflow phase requested: {phase}\n\n"
+        f"Live behavioral evidence for this entity (computed just now from the current synthetic dataset):\n"
+        f"{json.dumps(evidence_payload, indent=2)}\n\n"
+        f"Write the investigation note for this entity in the '{phase}' template. "
+        f"Use only the evidence given above — do not invent facts."
+    )
+
+    try:
+        resp = requests.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": AGENT_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                "temperature": 0.2,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        note = data["choices"][0]["message"]["content"]
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Groq call failed: {exc}")
+
+    investigation_cache[cache_key] = (note, time.time())
+    return {
+        "entity_id": entity_id,
+        "workflow": req.workflow,
+        "note": note,
+        "model": GROQ_MODEL,
+        "cached": False,
+    }
 
 @app.post("/regenerate")
 async def regenerate(seed: Optional[int] = None):

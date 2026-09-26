@@ -46,6 +46,61 @@ body {
   font-family: 'Instrument Serif', Georgia, serif;
 }
 
+.investigation-note h1,
+.investigation-note h2,
+.investigation-note h3 {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin: 16px 0 6px;
+}
+.investigation-note h1:first-child,
+.investigation-note h2:first-child,
+.investigation-note h3:first-child {
+  margin-top: 0;
+}
+.investigation-note p {
+  margin: 0 0 10px;
+}
+.investigation-note strong {
+  color: var(--text);
+}
+.investigation-note ul,
+.investigation-note ol {
+  margin: 0 0 10px;
+  padding-left: 18px;
+}
+.investigation-note li {
+  margin-bottom: 4px;
+}
+.investigation-note hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+.investigation-note table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0 14px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.investigation-note th,
+.investigation-note td {
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.investigation-note th {
+  background: var(--surface);
+  font-weight: 600;
+}
+
 button {
   font-family: inherit;
   cursor: pointer;

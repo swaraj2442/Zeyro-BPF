@@ -1,4 +1,7 @@
+import { useEffect, useState } from 'react';
+import { marked } from 'marked';
 import { buildInvestigationNote } from '../investigationNote';
+import { api } from '../api';
 
 const workflowTabs = ['Counterparty', 'Transaction', 'Early Warning', 'Investigation'];
 
@@ -58,6 +61,43 @@ function NoteBlock({ line }) {
 }
 
 export default function SidePanel({ entity, activeWorkflow, onWorkflowChange }) {
+  const [liveNote, setLiveNote] = useState(null);
+  const [noteLoading, setNoteLoading] = useState(false);
+  const [noteError, setNoteError] = useState(null);
+
+  useEffect(() => {
+    if (!entity) {
+      setLiveNote(null);
+      setNoteError(null);
+      return;
+    }
+    let cancelled = false;
+    let timeoutId;
+
+    const fetchNote = () => {
+      setNoteLoading(true);
+      setNoteError(null);
+      setLiveNote(null);
+      api
+        .investigate(entity.entity_id, activeWorkflow)
+        .then((res) => {
+          if (!cancelled) setLiveNote(res);
+        })
+        .catch((err) => {
+          if (!cancelled) setNoteError(err.message);
+        })
+        .finally(() => {
+          if (!cancelled) setNoteLoading(false);
+        });
+    };
+
+    timeoutId = setTimeout(fetchNote, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [entity, activeWorkflow]);
+
   return (
     <div
       style={{
@@ -110,6 +150,18 @@ export default function SidePanel({ entity, activeWorkflow, onWorkflowChange }) 
               <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)' }}>
                 Trade Sentinel Agent
               </span>
+              <span
+                style={{
+                  fontSize: 11,
+                  fontWeight: 600,
+                  padding: '2px 8px',
+                  borderRadius: 999,
+                  background: liveNote ? 'var(--risk-low)' : noteLoading ? 'var(--surface-muted)' : 'var(--risk-med)',
+                  color: liveNote ? '#1c1b19' : 'var(--text-muted)',
+                }}
+              >
+                {noteLoading ? 'CALLING GROQ…' : liveNote ? `LIVE · ${liveNote.model}` : 'LOCAL FALLBACK'}
+              </span>
             </div>
             <div
               style={{
@@ -119,9 +171,24 @@ export default function SidePanel({ entity, activeWorkflow, onWorkflowChange }) 
                 padding: 18,
               }}
             >
-              {buildInvestigationNote(entity).map((line, i) => (
-                <NoteBlock key={i} line={line} />
-              ))}
+              {liveNote ? (
+                <div
+                  className="investigation-note"
+                  style={{ fontSize: 13, lineHeight: 1.7 }}
+                  dangerouslySetInnerHTML={{ __html: marked.parse(liveNote.note) }}
+                />
+              ) : (
+                <>
+                  {noteError && (
+                    <div style={{ fontSize: 11, color: 'var(--risk-high)', marginBottom: 12 }}>
+                      Live agent call failed ({noteError}) — showing locally computed note instead.
+                    </div>
+                  )}
+                  {buildInvestigationNote(entity).map((line, i) => (
+                    <NoteBlock key={i} line={line} />
+                  ))}
+                </>
+              )}
             </div>
           </>
         )}
